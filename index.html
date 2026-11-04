@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>속삭임 대숲</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gowun+Dodum&family=Nanum+Myeongjo:wght@700&display=swap">
+<style>
+/* Layout: 화면 전체가 안개 낀 3D 대숲. 위 왼쪽 숲 이름, 위 오른쪽 사람 수·바람 소리, 아래 가운데 말 입력창. 새벽 숲 한 가지 화면으로 고정. */
+:root{
+  --ink:#0f1a14; --glass:rgba(16,30,22,.55); --glass-line:rgba(220,236,214,.22);
+  --paper:#eef3e6; --dim:#a9bba4; --leaf:#9fd18a;
+  --font-ui:"Gowun Dodum","Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+  --font-name:"Nanum Myeongjo",serif;
+  color-scheme:dark;
+}
+[hidden]{display:none!important}
+html,body{height:100%;margin:0;overflow:hidden;background:var(--ink);color:var(--paper);font-family:var(--font-ui)}
+#scene{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:pointer}
+.ui{position:fixed;z-index:2;display:flex;gap:8px;align-items:center}
+.pill{background:var(--glass);border:1px solid var(--glass-line);border-radius:999px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  display:flex;align-items:center;gap:10px;padding:8px 14px;font-size:.88rem;color:var(--paper)}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;padding:0}
+button:focus-visible,input:focus-visible{outline:2px solid var(--leaf);outline-offset:3px}
+.top-left{top:calc(env(safe-area-inset-top,0px) + 14px);left:max(16px,env(safe-area-inset-left,0px));flex-direction:column;align-items:flex-start;gap:6px}
+.name{font-family:var(--font-name);font-size:1.05rem;letter-spacing:.14em}
+.note{font-size:.74rem;color:var(--paper);background:var(--glass);border-radius:999px;padding:4px 10px}
+.top-right{top:calc(env(safe-area-inset-top,0px) + 14px);right:max(16px,env(safe-area-inset-right,0px));flex-direction:column;align-items:flex-end;gap:6px}
+.count{font-variant-numeric:tabular-nums}
+.wind[aria-pressed="true"]{border-color:var(--leaf);color:var(--leaf)}
+.bottom{bottom:calc(env(safe-area-inset-bottom,0px) + 18px);left:50%;transform:translateX(-50%);flex-direction:column;width:min(560px,calc(100vw - 32px))}
+form.say{width:100%;box-sizing:border-box;padding:6px 6px 6px 18px;gap:8px}
+form.say input{flex:1;min-width:0;background:none;border:0;color:var(--paper);font:inherit;font-size:1rem;padding:8px 0;outline:none}
+form.say input::placeholder{color:var(--dim)}
+form.say button{background:var(--paper);color:var(--ink);border-radius:999px;padding:9px 18px;font-weight:700;white-space:nowrap}
+form.say button[disabled]{opacity:.45;cursor:default}
+.meta{display:flex;justify-content:space-between;gap:8px;width:100%;font-size:.74rem;color:var(--paper);padding:0 14px;box-sizing:border-box;text-shadow:0 1px 4px #000,0 0 8px #000}
+.meta .len{font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+<canvas id="scene" aria-label="안개 낀 대나무숲. 바닥을 누르면 그쪽으로 걸어갑니다."></canvas>
+
+<div class="ui top-left">
+  <div class="pill"><span class="name">속삭임 대숲</span></div>
+  <span class="note">시안 · 다른 사람 말은 예시로 떠오르는 구름이에요</span>
+</div>
+
+<div class="ui top-right">
+  <div class="pill"><span title="숲에 있는 사람">숲에 <span class="count" id="count">0</span>명</span></div>
+  <button class="pill wind" id="wind" type="button" aria-pressed="false">바람 소리 듣기</button>
+</div>
+
+<div class="ui bottom">
+  <form class="pill say" id="sayForm" autocomplete="off">
+    <input id="msg" maxlength="60" placeholder="아무도 모르게 하고 싶은 말을 적어 보세요" aria-label="구름으로 띄울 말">
+    <button id="send" type="submit" disabled>띄우기</button>
+  </form>
+  <div class="meta"><span>이름 없이 떠올라 20초 뒤 흩어져요 · 바닥을 누르면 걸어가요</span><span class="len" id="len">0/60</span></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(()=>{
+const $=id=>document.getElementById(id);
+const rand=(a,b)=>a+Math.random()*(b-a), pick=a=>a[Math.floor(Math.random()*a.length)];
+const LIFE=20;
+
+/* ---------- 렌더러 ---------- */
+const canvas=$('scene');
+const renderer=new THREE.WebGLRenderer({canvas,antialias:true});
+renderer.setPixelRatio(Math.min(2,devicePixelRatio||1));
+renderer.outputEncoding=THREE.sRGBEncoding;
+const scene=new THREE.Scene();
+const FOG=0x9db8a2;
+scene.background=new THREE.Color(FOG);
+scene.fog=new THREE.FogExp2(FOG,.045);
+const camera=new THREE.PerspectiveCamera(55,1,.1,120);
+function resize(){const w=innerWidth,h=innerHeight;renderer.setSize(w,h,false);camera.aspect=w/h;camera.fov=w<h?68:55;camera.updateProjectionMatrix();}
+addEventListener('resize',resize);resize();
+
+function canvasTex(w,h,draw,rep){const c=document.createElement('canvas');c.width=w;c.height=h;draw(c.getContext('2d'),w,h);
+  const t=new THREE.CanvasTexture(c);t.encoding=THREE.sRGBEncoding;if(rep){t.wrapS=t.wrapT=THREE.RepeatWrapping;t.repeat.set(rep[0],rep[1]);}t.anisotropy=4;return t;}
+
+/* ---------- 땅과 길 ---------- */
+const groundTex=canvasTex(512,512,(g,w,h)=>{g.fillStyle='#4a5a3c';g.fillRect(0,0,w,h);
+  for(let i=0;i<4000;i++){g.fillStyle=pick(['#3c4a30','#5c6b44','#6b6a46','#7a7450','#34402a']);g.globalAlpha=rand(.3,.8);
+    g.beginPath();g.ellipse(rand(0,w),rand(0,h),rand(2,8),rand(1,3),rand(0,3),0,7);g.fill();}},[12,12]);
+const ground=new THREE.Mesh(new THREE.PlaneGeometry(120,120),new THREE.MeshStandardMaterial({map:groundTex,roughness:1}));
+ground.rotation.x=-Math.PI/2;scene.add(ground);
+const pathTex=canvasTex(256,512,(g,w,h)=>{g.fillStyle='#8f8466';g.fillRect(0,0,w,h);
+  for(let i=0;i<1500;i++){g.fillStyle=pick(['#7d7358','#a29676','#6e664e']);g.globalAlpha=rand(.3,.8);g.beginPath();g.arc(rand(0,w),rand(0,h),rand(1,4),0,7);g.fill();}
+  g.globalAlpha=1;const e=g.createLinearGradient(0,0,w,0);e.addColorStop(0,'rgba(74,90,60,1)');e.addColorStop(.18,'rgba(74,90,60,0)');e.addColorStop(.82,'rgba(74,90,60,0)');e.addColorStop(1,'rgba(74,90,60,1)');g.fillStyle=e;g.fillRect(0,0,w,h);},[1,10]);
+const path=new THREE.Mesh(new THREE.PlaneGeometry(3.2,120),new THREE.MeshStandardMaterial({map:pathTex,roughness:1}));
+path.rotation.x=-Math.PI/2;path.position.y=.01;scene.add(path);
+// 길 따라 놓인 디딤돌
+const stoneMat=new THREE.MeshStandardMaterial({color:0x8a8b80,roughness:.95});
+for(let z=-50;z<50;z+=1.6){const s=new THREE.Mesh(new THREE.CylinderGeometry(rand(.32,.45),rand(.4,.5),.08,9),stoneMat);s.position.set(rand(-.5,.5),.03,z);s.rotation.y=rand(0,3);scene.add(s);}
+
+/* ---------- 대나무 ---------- */
+const stalkMats=[0x6f9a52,0x5d8a47,0x7ca85b,0x86a660].map(c=>new THREE.MeshStandardMaterial({color:c,roughness:.55}));
+const nodeMat=new THREE.MeshStandardMaterial({color:0x4d6e3a,roughness:.6});
+const leafTex=canvasTex(256,256,(g,w,h)=>{
+  for(let i=0;i<70;i++){const x=rand(20,w-20),y=rand(20,h-20),a=rand(-1.2,1.2)+Math.PI/2*(Math.random()<.5?1:-1)*.3,l=rand(26,48);
+    g.save();g.translate(x,y);g.rotate(a);g.fillStyle=pick(['#4f7d3c','#6a9a4c','#3d6630','#82ad5e']);g.beginPath();g.moveTo(0,0);g.quadraticCurveTo(l*.5,-6,l,0);g.quadraticCurveTo(l*.5,6,0,0);g.fill();g.restore();}});
+const leafMat=new THREE.SpriteMaterial({map:leafTex,transparent:true,depthWrite:false,fog:true});
+const stalks=[];
+const stalkGeo=new THREE.CylinderGeometry(1,1,1,10),nodeGeo=new THREE.TorusGeometry(1,.18,5,12);
+function addBamboo(x,z){
+  const r=rand(.07,.14),h=rand(9,16),grp=new THREE.Group();grp.position.set(x,0,z);
+  const lean=new THREE.Group();lean.rotation.set(rand(-.05,.05),0,rand(-.05,.05));grp.add(lean);
+  const s=new THREE.Mesh(stalkGeo,pick(stalkMats));s.scale.set(r,h,r);s.position.y=h/2;lean.add(s);
+  for(let y=rand(.6,1.2);y<h;y+=rand(.9,1.4)){const n=new THREE.Mesh(nodeGeo,nodeMat);n.scale.set(r*1.05,r*1.05,r*1.05);n.rotation.x=Math.PI/2;n.position.y=y;lean.add(n);}
+  for(let k=0;k<4;k++){const sp=new THREE.Sprite(leafMat);const sz=rand(1.6,2.8);sp.scale.set(sz,sz,1);sp.position.set(rand(-.6,.6),h*rand(.62,1),rand(-.6,.6));lean.add(sp);}
+  scene.add(grp);stalks.push({lean,ph:Math.random()*6,amp:rand(.01,.025)});
+}
+for(let i=0;i<520;i++){
+  const x=rand(-34,34),z=rand(-50,50);
+  if(Math.abs(x)<2.4)continue;
+  addBamboo(x,z);
+}
+// 빛 줄기
+const rayTex=canvasTex(64,256,(g,w,h)=>{const gr=g.createLinearGradient(0,0,0,h);gr.addColorStop(0,'rgba(255,250,220,.0)');gr.addColorStop(.3,'rgba(255,250,220,.35)');gr.addColorStop(1,'rgba(255,250,220,0)');g.fillStyle=gr;
+  const hz=g.createLinearGradient(0,0,w,0);g.fillRect(0,0,w,h);g.globalCompositeOperation='destination-in';hz.addColorStop(0,'rgba(0,0,0,0)');hz.addColorStop(.5,'rgba(0,0,0,1)');hz.addColorStop(1,'rgba(0,0,0,0)');g.fillStyle=hz;g.fillRect(0,0,w,h);});
+const rayMat=new THREE.MeshBasicMaterial({map:rayTex,transparent:true,depthWrite:false,blending:THREE.AdditiveBlending,side:THREE.DoubleSide,fog:false,opacity:.5});
+const rays=[];
+for(let i=0;i<9;i++){const m=new THREE.Mesh(new THREE.PlaneGeometry(rand(1.5,3),18),rayMat.clone());m.position.set(rand(-10,10),7,rand(-30,10));m.rotation.set(0,rand(0,3),-.35);scene.add(m);rays.push(m);}
+
+scene.add(new THREE.HemisphereLight(0xeaf6e0,0x3a4a2c,.95));
+const sun=new THREE.DirectionalLight(0xfff4d6,.6);sun.position.set(-10,20,8);scene.add(sun);
+
+/* ---------- 사람 ---------- */
+const skin=new THREE.MeshStandardMaterial({color:0xd29a70,roughness:.6});
+const cloaks=[0xe8e2d0,0xc9d6c0,0xb7c4cf,0xd8c4b0,0xa9b89a].map(c=>new THREE.MeshStandardMaterial({color:c,roughness:.85}));
+const shadowMat=new THREE.MeshBasicMaterial({color:0,transparent:true,opacity:.22,depthWrite:false});
+const PG={leg:new THREE.CylinderGeometry(.11,.1,.4,8),body:new THREE.CylinderGeometry(.24,.4,.85,14),head:new THREE.SphereGeometry(.34,20,14),
+  hat:new THREE.ConeGeometry(.62,.32,20),arm:new THREE.CylinderGeometry(.08,.09,.4,8),shadow:new THREE.CircleGeometry(.45,18)};
+function makePerson(me){
+  const root=new THREE.Group();
+  const sh=new THREE.Mesh(PG.shadow,shadowMat);sh.rotation.x=-Math.PI/2;sh.position.y=.01;root.add(sh);
+  const legs=[-1,1].map(s=>{const pv=new THREE.Group();pv.position.set(s*.12,.4,0);root.add(pv);const l=new THREE.Mesh(PG.leg,cloaks[2]);l.position.y=-.2;pv.add(l);return pv;});
+  const cloak=me?cloaks[0]:pick(cloaks);
+  const b=new THREE.Mesh(PG.body,cloak);b.position.y=.78;root.add(b);
+  const arms=[-1,1].map(s=>{const pv=new THREE.Group();pv.position.set(s*.3,1.1,0);root.add(pv);const a=new THREE.Mesh(PG.arm,cloak);a.position.y=-.2;pv.add(a);
+    const hnd=new THREE.Mesh(new THREE.SphereGeometry(.07,8,6),skin);hnd.position.y=-.41;pv.add(hnd);return pv;});
+  const hd=new THREE.Mesh(PG.head,skin);hd.position.y=1.48;root.add(hd);
+  const hat=new THREE.Mesh(PG.hat,new THREE.MeshStandardMaterial({color:0xc9a66a,roughness:.9}));hat.position.y=1.78;root.add(hat);
+  scene.add(root);
+  return {root,legs,arms,target:null,speed:me?2.2:rand(.7,1.1),phase:Math.random()*6,walking:false,shout:0,wait:rand(3,10)};
+}
+const me=makePerson(true);me.root.position.set(0,0,12);me.root.rotation.y=0;
+const others=[];
+for(let i=0;i<7;i++){const p=makePerson(false);p.root.position.set(rand(-1,1),0,rand(-30,6));p.root.rotation.y=Math.random()<.5?0:Math.PI;others.push(p);}
+function updateCount(){$('count').textContent=others.length+1+Math.floor(rand(4,20));}
+updateCount();setInterval(updateCount,15000);
+
+/* ---------- 구름 말 ---------- */
+const clouds=[];
+function wrap(g,text,max){const out=[];let line='';for(const ch of text){const t=line+ch;if(g.measureText(t).width>max&&line){out.push(line);line=ch.trim()?ch:'';}else line=t;}if(line)out.push(line);return out.slice(0,3);}
+function cloudSprite(text,mine){
+  const c=document.createElement('canvas'),g=c.getContext('2d');c.width=640;c.height=400;
+  g.font='34px "Gowun Dodum", sans-serif';const lines=wrap(g,text,400);
+  const cx=320,cy=200,w=Math.max(220,Math.min(440,Math.max(...lines.map(l=>g.measureText(l).width))+70)),hh=60+lines.length*44;
+  // 몽글몽글한 구름: 겹친 원들
+  g.save();g.shadowColor='rgba(40,60,45,.25)';g.shadowBlur=24;g.shadowOffsetY=8;g.fillStyle=mine?'#ffffff':'#f4f7f0';
+  const blobs=[];const n=Math.round(w/46);
+  for(let i=0;i<=n;i++){const x=cx-w/2+i*(w/n);blobs.push([x,cy-hh/2+rand(-6,6),rand(38,58)]);blobs.push([x,cy+hh/2+rand(-6,6),rand(30,44)]);}
+  blobs.push([cx-w/2,cy,hh/2+6],[cx+w/2,cy,hh/2+6]);
+  g.beginPath();g.roundRect?g.roundRect(cx-w/2,cy-hh/2,w,hh,30):g.rect(cx-w/2,cy-hh/2,w,hh);blobs.forEach(([x,y,r])=>{g.moveTo(x+r,y);g.arc(x,y,r,0,7);});g.fill();g.restore();
+  g.fillStyle='#2f4636';g.textAlign='center';g.textBaseline='middle';
+  lines.forEach((l,i)=>g.fillText(l,cx,cy+(i-(lines.length-1)/2)*44));
+  const t=new THREE.CanvasTexture(c);t.encoding=THREE.sRGBEncoding;
+  const s=new THREE.Sprite(new THREE.SpriteMaterial({map:t,transparent:true,depthWrite:false,fog:false,opacity:0}));
+  s.scale.set(3.2,2,1);s.renderOrder=5;return s;
+}
+function release(text,who,mine){
+  const s=cloudSprite(text,mine);const p=who.root.position;
+  s.position.set(p.x,2.3,p.z);scene.add(s);
+  clouds.push({s,age:0,vx:rand(-.25,.25)+(mine?0:0),vz:rand(-.15,.05),rise:mine?.32:.26,base:mine?1:.85});
+  who.shout=1.2;puff();
+}
+const EXAMPLES=['임금님 귀는 당나귀 귀','오늘 회의에서 아무 말도 못 했다','사실 그 노래 나도 좋아해','이번 주만 버티면 된다','엄마한테 고맙다고 말하고 싶다',
+  '퇴사하고 싶은데 월급날이 너무 달다','그때 미안했어','짝사랑 3년 차, 오늘도 인사만 했다','다이어트는 내일부터','아무도 모르게 울고 나왔다','고양이가 나보다 바쁘다','나 생각보다 잘하고 있는 듯'];
+setInterval(()=>{if(document.hidden)return;const p=pick(others);release(pick(EXAMPLES),p,false);},7000);
+setTimeout(()=>release('임금님 귀는 당나귀 귀',others[0],false),1200);
+
+/* ---------- 소리 ---------- */
+let ac=null,wind=null;
+function audio(){if(!ac){try{ac=new (window.AudioContext||window.webkitAudioContext)();}catch(e){return null;}}if(ac.state==='suspended')ac.resume();return ac;}
+function noise(a,sec){const b=a.createBuffer(1,a.sampleRate*sec,a.sampleRate),d=b.getChannelData(0);let last=0;for(let i=0;i<d.length;i++){last=(last+.02*(Math.random()*2-1))/1.02;d[i]=last*3.5;}return b;}
+function puff(){const a=ac;if(!a||!wind)return;const t=a.currentTime,s=a.createBufferSource(),f=a.createBiquadFilter(),g=a.createGain();s.buffer=noise(a,1.5);f.type='bandpass';f.frequency.setValueAtTime(400,t);f.frequency.exponentialRampToValueAtTime(1400,t+1.2);
+  g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(.5,t+.3);g.gain.exponentialRampToValueAtTime(.001,t+1.4);s.connect(f).connect(g).connect(a.destination);s.start(t);s.stop(t+1.5);}
+function startWind(){const a=audio();if(!a)return;const s=a.createBufferSource();s.buffer=noise(a,6);s.loop=true;const f=a.createBiquadFilter();f.type='lowpass';f.frequency.value=700;
+  const g=a.createGain();g.gain.value=.35;const lfo=a.createOscillator(),lg=a.createGain();lfo.frequency.value=.12;lg.gain.value=.22;lfo.connect(lg).connect(g.gain);
+  const lfo2=a.createOscillator(),lg2=a.createGain();lfo2.frequency.value=.07;lg2.gain.value=350;lfo2.connect(lg2).connect(f.frequency);
+  s.connect(f).connect(g).connect(a.destination);s.start();lfo.start();lfo2.start();wind=[s,lfo,lfo2];}
+function stopWind(){(wind||[]).forEach(n=>{try{n.stop()}catch(e){}});wind=null;}
+$('wind').addEventListener('click',e=>{const on=e.currentTarget.getAttribute('aria-pressed')!=='true';e.currentTarget.setAttribute('aria-pressed',on);on?startWind():stopWind();});
+
+/* ---------- 입력 ---------- */
+const msg=$('msg');
+msg.addEventListener('input',()=>{const n=msg.value.trim().length;$('len').textContent=msg.value.length+'/60';$('send').disabled=n===0;});
+$('sayForm').addEventListener('submit',e=>{e.preventDefault();const t=msg.value.trim();if(!t)return;release(t,me,true);msg.value='';$('len').textContent='0/60';$('send').disabled=true;});
+
+let yaw=0,yawTarget=0,drag=null;
+const ray=new THREE.Raycaster(),ndc=new THREE.Vector2();
+canvas.addEventListener('pointerdown',e=>{drag={x:e.clientX,yaw:yawTarget,moved:false};canvas.setPointerCapture(e.pointerId);});
+canvas.addEventListener('pointermove',e=>{if(!drag)return;const dx=e.clientX-drag.x;if(Math.abs(dx)>6)drag.moved=true;if(drag.moved)yawTarget=drag.yaw-dx*.005;});
+canvas.addEventListener('pointerup',e=>{const d=drag;drag=null;if(!d||d.moved)return;
+  ndc.set(e.clientX/innerWidth*2-1,-(e.clientY/innerHeight)*2+1);ray.setFromCamera(ndc,camera);
+  const h=ray.intersectObject(ground)[0];if(!h)return;
+  me.target={x:Math.max(-30,Math.min(30,h.point.x)),z:Math.max(-48,Math.min(48,h.point.z))};});
+
+/* ---------- 움직임 ---------- */
+function step(p,dt,time){
+  const pos=p.root.position;
+  if(p.target){const dx=p.target.x-pos.x,dz=p.target.z-pos.z,d=Math.hypot(dx,dz);
+    if(d<.05){p.target=null;}else{const want=Math.atan2(-dx,-dz);let df=want-p.root.rotation.y;df=Math.atan2(Math.sin(df),Math.cos(df));p.root.rotation.y+=df*Math.min(1,dt*7);
+      const s=Math.min(d,p.speed*dt);pos.x+=dx/d*s;pos.z+=dz/d*s;}}
+  const walking=!!p.target,sw=walking?Math.sin(time*8+p.phase):0;
+  p.legs[0].rotation.x=sw*.5;p.legs[1].rotation.x=-sw*.5;
+  if(p.shout>0){p.shout-=dt;const k=Math.sin(Math.min(1,(1.2-p.shout)/1.2)*Math.PI);p.arms.forEach((a,i)=>{a.rotation.x=1.6*k;a.rotation.z=(i?-1:1)*.5*k;});}
+  else p.arms.forEach((a,i)=>{a.rotation.x=-sw*.4*(i?-1:1);a.rotation.z=(i?-1:1)*.08;});
+}
+function otherBrain(p,dt){p.wait-=dt;if(!p.target&&p.wait<=0){p.target={x:rand(-1,1),z:Math.max(-45,Math.min(10,p.root.position.z+rand(-8,8)))};p.wait=rand(6,16);}}
+
+const clock=new THREE.Clock(),camPos=new THREE.Vector3(),look=new THREE.Vector3();
+camera.position.set(0,3,17);
+function frame(){
+  const dt=Math.min(.05,clock.getDelta()),time=clock.elapsedTime;
+  step(me,dt,time);others.forEach(p=>{otherBrain(p,dt);step(p,dt,time);});
+  stalks.forEach(s=>{s.lean.rotation.x=Math.sin(time*.7+s.ph)*s.amp;s.lean.rotation.z=Math.cos(time*.5+s.ph)*s.amp;});
+  rays.forEach((r,i)=>r.material.opacity=.32+Math.sin(time*.3+i)*.14);
+  for(let i=clouds.length-1;i>=0;i--){const c=clouds[i];c.age+=dt;const k=c.age/LIFE;
+    if(k>=1){scene.remove(c.s);c.s.material.map.dispose();c.s.material.dispose();clouds.splice(i,1);continue;}
+    c.s.position.y+=c.rise*dt;c.s.position.x+=c.vx*dt;c.s.position.z+=c.vz*dt;
+    const fadeIn=Math.min(1,c.age/1),fadeOut=k>.7?1-(k-.7)/.3:1;c.s.material.opacity=c.base*fadeIn*fadeOut;
+    const grow=1+k*.5;c.s.scale.set(3.2*grow,2*grow,1);}
+  yaw+=(yawTarget-yaw)*Math.min(1,dt*6);
+  const p=me.root.position;camPos.set(p.x+Math.sin(yaw)*5.5,2.6,p.z+Math.cos(yaw)*5.5);camera.position.lerp(camPos,Math.min(1,dt*3));
+  look.set(p.x-Math.sin(yaw)*4,2.4,p.z-Math.cos(yaw)*4);camera.lookAt(look);
+  renderer.render(scene,camera);requestAnimationFrame(frame);
+}
+frame();
+})();
+</script>
+</body>
+</html>
