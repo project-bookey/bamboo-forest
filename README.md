@@ -43,7 +43,7 @@ npm test
 
 ## 기존 서버 배포 구조
 
-2026-11-08에 `metro-chat-20261108-v6`을 배포했습니다. API 키를 서버 전용 환경 파일에 설정했습니다. 운영 모드는 `live`이며 서울시 API의 `INFO-200`(해당 데이터 없음) 응답을 확인했습니다. 실제 운행 중 열차번호·방향 검증은 남아 있습니다. 공개 주소는 `https://www.bookey.site/metro-chat/`입니다. systemd 서비스 이름과 서버 설치 경로는 기존 설정을 유지합니다. nginx는 새 URL과 이전 URL의 리다이렉트를 처리합니다. 실제 API 키는 `/opt/bamboo-forest/subway.env`에 `SEOUL_SUBWAY_API_KEY=...`로 설정합니다. 해당 파일은 서버 관리자가 root 전용 권한으로 관리합니다. 서비스는 이 환경 파일이 없어도 실행되며 연결 준비 상태가 됩니다.
+2026-11-08에 `metro-chat-20261108-v7`을 배포했습니다. API 키를 서버 전용 환경 파일에 설정했습니다. 운영 모드는 `live`이며 서울시 API의 `INFO-200`(해당 데이터 없음) 응답을 확인했습니다. 실제 운행 중 열차번호·방향 검증은 남아 있습니다. 공개 주소는 `https://www.bookey.site/metro-chat/`입니다. systemd 서비스 이름과 서버 설치 경로는 기존 설정을 유지합니다. nginx는 새 URL과 이전 URL의 리다이렉트를 처리합니다. 실제 API 키는 `/opt/bamboo-forest/subway.env`에 `SEOUL_SUBWAY_API_KEY=...`로 설정합니다. 해당 파일은 서버 관리자가 root 전용 권한으로 관리합니다. 서비스는 이 환경 파일이 없어도 실행되며 연결 준비 상태가 됩니다.
 
 ```sh
 tar -czf /tmp/bamboo-forest.tar.gz index.html client.js features.js cabin.js cabin.css cabin-data.mjs cabin-environment.js cabin-controls.js vendor journey.mjs server.mjs transit.mjs lines.mjs timetable.mjs positions.mjs moderation.mjs data scripts test world.mjs package.json README.md infra
@@ -115,7 +115,7 @@ sudo /opt/mandragora/node/bin/node --env-file=/opt/bamboo-forest/subway.env /opt
 추가 API: `POST trip-check`, `POST trip-options`(`autoLeave` boolean), `POST report`, `POST block`, `POST unblock`. `GET trains`에 `source=arrivals|running`을 지정합니다.
 
 
-## 3D 객실 화면 (로컬 수정)
+## 3D 객실 화면 (v7)
 
 기존 대나무숲의 전체 화면 3D 공간, 캐릭터 이동, 머리 위 말풍선 방식을 지하철 객실로 옮겼습니다. 탑승 후 바닥 클릭/터치 또는 객실에 포커스를 둔 방향키·WASD로 이동하고, 드래그해서 둘러봅니다. 같은 열차의 연결된 실제 접속자만 캐릭터로 표시합니다. 이동 목적지는 서버가 객실 통로 안으로 제한하고 초당 2.2 단위로 계산해 SSE로 공유합니다. 이동은 `POST /metro-chat/api/move`의 `{ "x": 0, "z": 3 }`으로 요청합니다. 실제 사용자 위치와 관계없는 객실 안 아바타 위치입니다.
 
@@ -124,7 +124,7 @@ sudo /opt/mandragora/node/bin/node --env-file=/opt/bamboo-forest/subway.env /opt
 `cabin.js`는 객실/캐릭터/말풍선 렌더링과 조작, `cabin.css`는 전체 화면과 패널 배치를 담당합니다. `vendor/three.module.min.js`는 Three.js 0.160.1의 로컬 사본이며 MIT 라이선스는 `vendor/three.LICENSE`에 포함합니다. 외부 CDN이나 빌드 없이 동작합니다. 배포 아카이브에는 이 세 항목과 `vendor` 디렉토리도 포함해야 합니다.
 
 
-## 가상 열차 확장 (로컬 수정)
+## 가상 열차 확장 (v7)
 
 - 6개의 가상 객실을 연결했습니다. 연결문 클릭/통로 끝까지 걷기, 아래 편성도, 이전/다음 버튼 또는 객실에 포커스를 둔 Q/E로 이동합니다. 실제 열차의 칸 수나 탑승 위치를 의미하지 않습니다. 열차 방과 하차역·자동 하차 설정은 칸 이동 중에도 유지됩니다. 칸마다 좌석 색, 대화 주제, 광고가 다릅니다.
 - 같은 칸의 접속자만 3D로 표시하고, 편성도에는 열차 전체의 칸별 접속 인원을 표시합니다. 기본 채팅 범위는 열차 전체입니다. 입력창에서 ‘같은 칸’을 고르면 그 칸의 사람에게만 전송합니다. 칸을 옮기면 그 칸에 남아 있는 최근 메시지를 볼 수 있습니다. 20초 말풍선·최근 60개/1시간 기록 정책은 유지합니다.
@@ -136,3 +136,16 @@ sudo /opt/mandragora/node/bin/node --env-file=/opt/bamboo-forest/subway.env /opt
 추가 API (익명 세션·동일 Origin JSON): `POST car` (`car`: 1~6), `POST seat` (`seat`: 좌석 ID 또는 null), `POST emote` (`kind`: wave/heart/clap), `POST appearance` (`coat`: 0~4). `POST say`는 선택적으로 `scope: train|car`를 받습니다. 응답/SSE는 `cars`(칸별 인원), `players`의 `car`·`seat`·`coat`·`emote`, 메시지의 `car`·`scope`를 포함합니다. 이동 API는 200ms, 칸 이동은 600ms, 좌석 변경은 300ms, 반응은 2.5초 간격을 제한합니다. 상태는 단일 서버 메모리이며 일반 세션과 함께 재시작 시 초기화됩니다.
 
 렌더링은 현재 칸 한 개를 재사용하므로 칸 수에 비례해 3D 자원이 늘어나지 않습니다. 이동만 갱신되는 SSE에서는 노선도·환승 UI를 다시 만들지 않습니다. 서버의 칸 이동·좌석 경쟁·채팅 범위·반응 만료·외형 동기화·하차 제한을 통합 테스트합니다.
+
+
+## v7 운영 배포 기록 (2026-11-08)
+
+- 릴리스: `/opt/bamboo-forest/releases/metro-chat-20261108-v7`
+- 배포 소스: Git 커밋 `3990fa0`
+- 복구 대상: `/opt/bamboo-forest/releases/metro-chat-20261108-v6`
+- 설정 백업: `/opt/bamboo-forest/deploy-backup.knj2zo`
+- 아카이브: `/private/tmp/metro-chat-3d-expanded-20261108.tar.gz`
+- SHA-256: `b3ed60469d9091f9d2f4fc507f518a696e196536c2b3bfa9c42a6a5c4b80bc61`
+- 검증: 배포 스크립트의 모듈 로드·nginx 검사·로컬/HTTPS health 통과. 서비스 active, NRestarts=0, mode=live. 공개 Chromium의 1440px·390px에서 3D 렌더링, 6칸 이동 UI, 광고 확대, 19개 노선, 실제 도착정보 조회와 페이지 오류/가로 넘침 없음을 확인. 운영자 API 무인증 접근 401, 비공개 서버 모듈 접근 404.
+- 운영 환경 파일과 신고 저장소 권한을 확인했습니다. 이번 배포용 임시 SSH 접근 규칙은 작업 후 제거했습니다.
+- 이 기록은 배포 후 추가한 문서이며 릴리스 아카이브에는 포함하지 않습니다.
