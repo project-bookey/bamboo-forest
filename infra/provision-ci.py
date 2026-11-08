@@ -12,6 +12,8 @@ SERVER_ROLE = 'bookey-ec2-s3-role'
 DEPLOY_ROLE = 'metro-chat-github-deploy'
 BUCKET = f'bookey-metro-chat-deploy-{ACCOUNT}-{REGION}'
 REPO = 'project-bookey/bamboo-forest'
+# This repository uses GitHub's immutable owner/repository ID subject format.
+OIDC_SUBJECT = 'repo:project-bookey@322972644/bamboo-forest@1445310722:ref:refs/heads/main'
 PROVIDER = f'arn:aws:iam::{ACCOUNT}:oidc-provider/token.actions.githubusercontent.com'
 
 def aws(*args, allow_missing=False):
@@ -25,7 +27,7 @@ identity = aws('sts', 'get-caller-identity')
 if identity['Account'] != ACCOUNT: raise RuntimeError('Unexpected AWS account')
 provider = aws('iam', 'get-open-id-connect-provider', '--open-id-connect-provider-arn', PROVIDER)
 if 'sts.amazonaws.com' not in provider['ClientIDList']: raise RuntimeError('GitHub OIDC provider does not allow STS')
-trust = {'Version': '2012-10-17', 'Statement': [{'Effect': 'Allow', 'Principal': {'Federated': PROVIDER}, 'Action': 'sts:AssumeRoleWithWebIdentity', 'Condition': {'StringEquals': {'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com', 'token.actions.githubusercontent.com:sub': f'repo:{REPO}:ref:refs/heads/main'}}}]}
+trust = {'Version': '2012-10-17', 'Statement': [{'Effect': 'Allow', 'Principal': {'Federated': PROVIDER}, 'Action': 'sts:AssumeRoleWithWebIdentity', 'Condition': {'StringEquals': {'token.actions.githubusercontent.com:aud': 'sts.amazonaws.com', 'token.actions.githubusercontent.com:sub': OIDC_SUBJECT}}}]}
 role = aws('iam', 'get-role', '--role-name', DEPLOY_ROLE, allow_missing=True)
 if role is None:
     role = aws('iam', 'create-role', '--role-name', DEPLOY_ROLE, '--assume-role-policy-document', json.dumps(trust), '--description', 'Metro Chat main branch deployment via GitHub OIDC', '--max-session-duration', '3600')
