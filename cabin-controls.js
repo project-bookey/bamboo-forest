@@ -13,7 +13,7 @@ export function installCabinControls({ api, applyState, getState, cabin, alert }
     <div id="seat-panel" class="cabin-popover" hidden><strong>빈 좌석에 앉아 볼까요?</strong><p>객실의 좌석을 직접 눌러도 앉을 수 있어요.</p><label for="seat-select">좌석 선택</label><select id="seat-select"></select><button type="button" id="seat-confirm" class="primary">앉기</button><button type="button" id="seat-stand" class="secondary">일어서기</button></div>`;
   document.body.append(host);
   const settings = document.createElement('details'); settings.className = 'cabin-settings'; settings.id = 'cabin-settings';
-  settings.innerHTML = `<summary>객실 설정</summary><div class="cabin-settings-body"><button type="button" id="train-sound" aria-pressed="false">열차 소리 켜기</button><label for="cabin-scenery">창밖 풍경 · 가상 배경</label><select id="cabin-scenery"><option value="tunnel">도시의 터널</option><option value="river">한강의 저녁</option></select><label class="check-label"><input type="checkbox" id="cabin-motion">창밖 움직임·캐릭터 애니메이션</label><label for="cabin-quality">화면 품질</label><select id="cabin-quality"><option value="high">선명하게</option><option value="low">배터리 절약</option></select><label>나의 옷 색상</label><div id="coat-colors" class="coat-colors" role="group" aria-label="옷 색상"></div><button id="browse-ads" type="button">객실 광고 둘러보기</button><p>칸과 풍경은 가상 공간이며 실제 열차 편성·위치를 나타내지 않아요.</p></div>`;
+  settings.innerHTML = `<summary>객실 설정</summary><div class="cabin-settings-body"><button type="button" id="train-sound" aria-pressed="false">열차 소리 켜기</button><label for="cabin-scenery">창밖 풍경 · 가상 배경</label><select id="cabin-scenery"><option value="tunnel">도시의 터널</option><option value="river">한강의 저녁</option></select><label class="check-label"><input type="checkbox" id="cabin-motion">창밖 움직임·캐릭터 애니메이션</label><label for="cabin-quality">화면 품질</label><select id="cabin-quality"><option value="auto">자동 조절</option><option value="high">선명하게</option><option value="low">배터리 절약</option></select><label>나의 옷 색상</label><div id="coat-colors" class="coat-colors" role="group" aria-label="옷 색상"></div><button id="browse-ads" type="button">객실 광고 둘러보기</button><p>칸과 풍경은 가상 공간이며 실제 열차 편성·위치를 나타내지 않아요.</p></div>`;
   document.body.append(settings);
   const dialog = document.createElement('dialog'); dialog.id = 'ad-dialog'; dialog.setAttribute('aria-labelledby', 'ad-brand');
   dialog.innerHTML = `<div class="ad-preview" id="ad-preview"><span id="ad-brand"></span><h2 id="ad-title"></h2><p id="ad-subtitle"></p><span class="ad-stamp">메트로챗 공간 광고 · 가상 브랜드</span></div><p id="ad-body"></p><div id="ad-tabs" class="ad-tabs" role="group" aria-label="다른 광고 보기"></div><div class="dialog-actions"><button type="button" id="ad-close" class="primary">객실로 돌아가기</button></div>`;
@@ -26,9 +26,9 @@ export function installCabinControls({ api, applyState, getState, cabin, alert }
   const reduced = matchMedia('(prefers-reduced-motion: reduce)');
   $('cabin-motion').checked = typeof preferences.animate === 'boolean' ? preferences.animate : !reduced.matches;
   $('cabin-scenery').value = preferences.scenery === 'river' ? 'river' : 'tunnel';
-  $('cabin-quality').value = preferences.quality === 'low' ? 'low' : 'high';
+  $('cabin-quality').value = preferences.version === 2 && ['low', 'high'].includes(preferences.quality) ? preferences.quality : 'auto';
   function configure() {
-    const value = { animate: $('cabin-motion').checked, scenery: $('cabin-scenery').value, quality: $('cabin-quality').value };
+    const value = { version: 2, animate: $('cabin-motion').checked, scenery: $('cabin-scenery').value, quality: $('cabin-quality').value };
     cabin.configure(value); try { localStorage.setItem('metro-cabin-preferences', JSON.stringify(value)); } catch { /* Private browsing still works. */ }
   }
   for (const id of ['cabin-motion', 'cabin-scenery', 'cabin-quality']) $(id).onchange = configure;

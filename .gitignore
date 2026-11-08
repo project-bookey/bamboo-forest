@@ -1,3 +1,4 @@
 .env
 .env.*
 subway.env
+__pycache__/

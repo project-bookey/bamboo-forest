@@ -1,0 +1,61 @@
+name: Test and deploy Metro Chat
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }} tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        node: ['20', '24']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Check JavaScript and deployment syntax
+        run: |
+          git ls-files -z '*.js' '*.mjs' | xargs -0 -n1 node --check
+          bash -n infra/deploy.sh
+      - run: npm test
+
+  deploy:
+    name: Deploy production
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: metro-chat-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      METRO_DEPLOY_BUCKET: ${{ vars.METRO_DEPLOY_BUCKET }}
+      METRO_INSTANCE_ID: ${{ vars.METRO_INSTANCE_ID }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c # v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: metro-chat-${{ github.run_id }}
+          role-duration-seconds: 1200
+      - name: Package tested revision
+        run: node scripts/package.mjs /tmp/metro-chat.tar.gz
+      - name: Upload, deploy via SSM, and verify production revision
+        run: node scripts/deploy-ssm.mjs /tmp/metro-chat.tar.gz

@@ -98,6 +98,29 @@ export function createEnvironment(scene) {
   }
   scene.add(new THREE.HemisphereLight('#f4fff8', '#617b80', 2.5));
   const sun = new THREE.DirectionalLight('#fff2d6', 2); sun.position.set(-2, 5, 5); scene.add(sun);
+  // Repeated static geometry is drawn in batches; retain seat picking by instance ID.
+  scene.updateMatrixWorld(true);
+  const batches = new Map();
+  for (const object of [...scene.children]) {
+    if (!object.isMesh || object === floor || object.userData.ad || posters.includes(object) || signs.some(s => s.tex === object.material.map)) continue;
+    const key = `${object.geometry.uuid}:${object.material.uuid}`;
+    if (!batches.has(key)) batches.set(key, []);
+    batches.get(key).push(object);
+  }
+  for (const objects of batches.values()) {
+    if (objects.length < 2) continue;
+    const batch = new THREE.InstancedMesh(objects[0].geometry, objects[0].material, objects.length);
+    batch.userData.targets = objects.map(object => object.userData);
+    let interactive = false;
+    objects.forEach((object, index) => {
+      batch.setMatrixAt(index, object.matrixWorld); scene.remove(object);
+      const target = interactables.indexOf(object);
+      if (target !== -1) { interactables.splice(target, 1); interactive = true; }
+    });
+    batch.instanceMatrix.needsUpdate = true; batch.computeBoundingSphere(); batch.matrixAutoUpdate = false; scene.add(batch);
+    if (interactive) interactables.push(batch);
+  }
+  for (const object of scene.children) if (object.isMesh && !object.isInstancedMesh) { object.updateMatrix(); object.matrixAutoUpdate = false; }
   let car = 1, lastAd = -1, lastSign = '', mode = 'tunnel';
   function update(next, time = Date.now()) {
     car = next.trip?.car || 1;

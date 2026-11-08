@@ -46,7 +46,7 @@ npm test
 2026-11-08에 `metro-chat-20261108-v7`을 배포했습니다. API 키를 서버 전용 환경 파일에 설정했습니다. 운영 모드는 `live`이며 서울시 API의 `INFO-200`(해당 데이터 없음) 응답을 확인했습니다. 실제 운행 중 열차번호·방향 검증은 남아 있습니다. 공개 주소는 `https://www.bookey.site/metro-chat/`입니다. systemd 서비스 이름과 서버 설치 경로는 기존 설정을 유지합니다. nginx는 새 URL과 이전 URL의 리다이렉트를 처리합니다. 실제 API 키는 `/opt/bamboo-forest/subway.env`에 `SEOUL_SUBWAY_API_KEY=...`로 설정합니다. 해당 파일은 서버 관리자가 root 전용 권한으로 관리합니다. 서비스는 이 환경 파일이 없어도 실행되며 연결 준비 상태가 됩니다.
 
 ```sh
-tar -czf /tmp/bamboo-forest.tar.gz index.html client.js features.js cabin.js cabin.css cabin-data.mjs cabin-environment.js cabin-controls.js vendor journey.mjs server.mjs transit.mjs lines.mjs timetable.mjs positions.mjs moderation.mjs data scripts test world.mjs package.json README.md infra
+tar -czf /tmp/bamboo-forest.tar.gz index.html client.js features.js cabin.js cabin.css cabin-data.mjs cabin-motion.mjs cabin-environment.js cabin-controls.js vendor journey.mjs server.mjs transit.mjs lines.mjs timetable.mjs positions.mjs moderation.mjs data scripts test world.mjs package.json README.md infra
 # 서버로 아카이브와 infra/deploy.sh를 전달한 뒤:
 sudo bash /tmp/bamboo-deploy.sh /tmp/bamboo-forest.tar.gz <버전>
 ```
@@ -149,3 +149,24 @@ sudo /opt/mandragora/node/bin/node --env-file=/opt/bamboo-forest/subway.env /opt
 - 검증: 배포 스크립트의 모듈 로드·nginx 검사·로컬/HTTPS health 통과. 서비스 active, NRestarts=0, mode=live. 공개 Chromium의 1440px·390px에서 3D 렌더링, 6칸 이동 UI, 광고 확대, 19개 노선, 실제 도착정보 조회와 페이지 오류/가로 넘침 없음을 확인. 운영자 API 무인증 접근 401, 비공개 서버 모듈 접근 404.
 - 운영 환경 파일과 신고 저장소 권한을 확인했습니다. 이번 배포용 임시 SSH 접근 규칙은 작업 후 제거했습니다.
 - 이 기록은 배포 후 추가한 문서이며 릴리스 아카이브에는 포함하지 않습니다.
+
+
+## 이동 성능 개선
+
+내 캐릭터는 입력 즉시 초당 2.2 단위로 이동하고, 서버 응답에 맞춰 보정합니다. 다른 승객도 서버가 전달한 출발점·목표점·시각으로 매 프레임 위치를 계산합니다. 이동 중에는 같은 칸에 작은 `motion` SSE 이벤트만 전달하며 채팅 기록이나 노선도를 다시 전송·생성하지 않습니다. 이동 요청은 한 번에 하나씩 처리하고, 대기 중 입력은 가장 최근 목적지로 합칩니다. 칸/열차 변경 전 발생한 지연 요청은 서버가 거부합니다.
+
+객실의 반복 구조물을 InstancedMesh로 묶고, 고정 HUD의 배경 블러와 프레임별 임시 객체 생성을 줄였습니다. 기본 화질은 자동 조절이며 모바일 픽셀 비율은 1부터 시작하고, 느린 프레임이 이어지면 해상도를 낮춥니다. 선명하게/배터리 절약을 수동 선택할 수도 있습니다. 동일한 로컬 Chromium의 두 캐릭터 장면에서 렌더 호출은 약 219회에서 52회로 감소했습니다. 이 수치는 실제 휴대전화의 FPS 보장이 아닙니다. 서버 응답을 보류한 브라우저 테스트에서도 입력 0.25초 뒤 이동하고 목적지에서 멈추는 것을 확인했습니다.
+
+## GitHub Actions CI / 자동 배포
+
+`.github/workflows/ci-deploy.yml`은 PR과 main 푸시에서 Node 20·24 구문 검사와 `npm test`를 실행합니다. main 테스트가 모두 통과하면 GitHub OIDC로 배포 역할을 받아 비공개 S3 버킷에 아카이브를 올리고, SSM으로 해당 운영 EC2 한 대에 배포합니다. 수동 재실행도 Actions의 Run workflow로 가능합니다. 다른 브랜치와 PR은 배포 권한을 얻지 못합니다.
+
+- SSH 키나 장기 AWS 액세스 키를 GitHub에 저장하지 않습니다. 브라우저 AWS 로그인·접속 IP 허용 목록 없이 배포할 수 있습니다.
+- 저장소 변수: `AWS_DEPLOY_ROLE`, `AWS_REGION`, `METRO_DEPLOY_BUCKET`, `METRO_INSTANCE_ID`. 운영 지하철 API 키와 운영자 키는 기존 서버 환경 파일에만 유지합니다.
+- `scripts/package.mjs`는 배포 파일을 묶고 `data/release.json`에 커밋 SHA를 기록합니다. 환경 파일·인증키·신고 저장소는 포함하지 않습니다. health의 `revision`으로 배포된 커밋을 확인합니다.
+- `scripts/deploy-ssm.mjs`는 S3 업로드, SHA-256 검증, SSM 실행 결과와 공개 health의 live 모드·커밋 SHA를 검사합니다. 운영 릴리스 이름에 커밋과 Actions 실행 번호를 포함합니다.
+- 배포는 Actions의 동시 실행 제어와 서버 파일 잠금으로 직렬화합니다. 모듈 로드, nginx, 로컬/HTTPS health 또는 커밋 검사가 실패하면 이전 릴리스·설정으로 복구합니다.
+- 아카이브 버킷은 공개 접근을 차단하고 암호화하며, `metro-chat/` 파일은 14일 후 만료됩니다. 서버에 설치된 이전 릴리스는 이 보관 정책과 별개입니다.
+- `infra/provision-ci.py`에 해당 저장소·main·인스턴스·아카이브 경로에 한정한 IAM 설정을 재현할 수 있게 기록했습니다. 최초 SSM 에이전트 설정 이후 정상 배포에 SSH는 사용하지 않습니다.
+
+Actions가 실패하면 해당 실행의 실패 단계와 SSM 명령 ID를 확인합니다. `deploy.sh`가 시작된 뒤 배포 검사 실패로 종료되면 이전 릴리스로 복구하지만, SSM 명령 자체의 시간 초과/단절은 최종 실행 상태를 확인한 뒤 재시도해야 합니다. 일반 채팅·탑승 세션은 기존과 같이 서버 재시작 시 초기화됩니다.

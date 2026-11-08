@@ -1,3 +1,4 @@
+import { createWalk, sampleWalk } from './cabin-motion.mjs';
 import * as THREE from './vendor/three.module.min.js';
 import { createEnvironment } from './cabin-environment.js';
 import { CAR_COUNT, CAR_THEMES, SEATS, REACTIONS, COAT_COLORS } from './cabin-data.mjs';
@@ -6,8 +7,10 @@ import { CAR_COUNT, CAR_THEMES, SEATS, REACTIONS, COAT_COLORS } from './cabin-da
 export function createCabin({ canvas, move, changeCar, sit, openAd, openMessage, onError }) {
   let renderer;
   try { renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false }); }
-  catch { onError('이 브라우저에서 3D 화면을 열 수 없어요. 탑승 설정에서 열차 선택과 대화 기록을 이용해 주세요.'); return { update() {}, setLine() {}, configure() {} }; }
-  renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 1.8));
+  catch { onError('이 브라우저에서 3D 화면을 열 수 없어요. 탑승 설정에서 열차 선택과 대화 기록을 이용해 주세요.'); return { update() {}, motion() {}, setLine() {}, configure() {}, metrics() { return {}; } }; }
+  let qualityMode = 'auto';
+  const autoRatio = () => Math.min(devicePixelRatio || 1, canvas.clientWidth < 760 ? 1 : 1.5);
+  renderer.setPixelRatio(autoRatio());
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   const scene = new THREE.Scene(); scene.background = new THREE.Color('#203749');
   scene.fog = new THREE.Fog('#849da3', 20, 48);
@@ -17,7 +20,7 @@ export function createCabin({ canvas, move, changeCar, sit, openAd, openMessage,
   const people = new Map(), bubbles = new Map(), seen = new Set();
   let current = null, room = '', yaw = 0, targetYaw = 0, drag = null, lastKeyMove = 0, car = 1;
   let motion = !reduced.matches;
-  let resetCamera = true, crossingAt = 0;
+  let resetCamera = true, crossingAt = 0, moveSequence = 0, pendingMove = 0;
   reduced.addEventListener('change', e => { motion = !e.matches; });
   const environment = createEnvironment(scene);
   const floor = environment.floor;
@@ -57,7 +60,31 @@ export function createCabin({ canvas, move, changeCar, sit, openAd, openMessage,
     scene.add(root, label); root.position.set(data.x, 0, data.z);
     return { root, legs, arms, label, coat, target: new THREE.Vector3(data.x, 0, data.z) };
   }
+  function applyMovement(record, force = false) {
+    const p = people.get(record.id);
+    if (!p || (record.car || 1) !== car || !record.walk) return;
+    const movement = { walk: record.walk, serverAt: record.serverAt ?? Date.now(), receivedAt: performance.now() };
+    p.authority = movement;
+    if (record.id === current?.id) {
+      if (pendingMove && !force) return;
+      // An ACK for the same destination must not rewind local motion by the RTT.
+      if (p.localWalk && p.movement && p.movement.walk.toX === record.walk.toX && p.movement.walk.toZ === record.walk.toZ) return;
+    }
+    p.localWalk = false; p.movement = movement;
+  }
+  async function requestMove(destination) {
+    const p = people.get(current?.id); if (!p || !current?.trip) return;
+    const sequence = ++moveSequence; pendingMove = sequence; p.localWalk = true;
+    p.movement = { walk: createWalk(p.root.position, destination, performance.now()), serverAt: performance.now(), receivedAt: performance.now() };
+    p.data = { ...p.data, seat: null }; p.chair = null;
+    try {
+      const reply = await move({ ...destination, car, room: current.trip.room });
+      if (pendingMove === sequence && reply?.walk) applyMovement(reply, true);
+    } catch { if (pendingMove === sequence && p.authority) { p.localWalk = false; p.movement = p.authority; } }
+    finally { if (pendingMove === sequence) pendingMove = 0; }
+  }
   function clear() {
+    moveSequence++; pendingMove = 0;
     for (const p of people.values()) { scene.remove(p.root); disposeSprite(p.label); p.coat.dispose(); if (p.emoteSprite) disposeSprite(p.emoteSprite); }
     people.clear(); for (const b of bubbles.values()) disposeSprite(b.sprite); bubbles.clear(); seen.clear();
   }
@@ -70,7 +97,8 @@ export function createCabin({ canvas, move, changeCar, sit, openAd, openMessage,
     for (const [id, p] of people) if (!visible.has(id)) { scene.remove(p.root); disposeSprite(p.label); p.coat.dispose(); if (p.emoteSprite) disposeSprite(p.emoteSprite); people.delete(id); }
     for (const data of inCar) {
       if (!people.has(data.id)) people.set(data.id, person(data, data.id === next.id));
-      const p = people.get(data.id); p.target.set(data.x, 0, data.z); p.data = data;
+      const p = people.get(data.id); p.data = data; p.chair = SEATS.find(s => s.id === data.seat);
+      if (data.walk) applyMovement({ ...data, serverAt: next.serverAt }); else { p.movement = null; p.target.set(data.x, 0, data.z); }
       p.coat.color.set(COAT_COLORS[data.coat] || hats[0]);
       if (data.emote && p.emoteUntil !== data.emote.until) {
         if (p.emoteSprite) disposeSprite(p.emoteSprite);
@@ -97,12 +125,13 @@ export function createCabin({ canvas, move, changeCar, sit, openAd, openMessage,
     const cloud = ray.intersectObjects([...bubbles.values()].map(b => b.sprite).filter(s => s.visible))[0];
     if (cloud) return openMessage(cloud.object.userData.messageId);
     if (!current?.trip) return;
-    const object = ray.intersectObjects(environment.interactables)[0]?.object;
-    if (object?.userData.ad) return openAd(object.userData.ad);
-    if (object?.userData.seat) return sit(object.userData.seat);
-    if (object?.userData.carDelta) return changeCar(car + object.userData.carDelta);
+    const hitObject = ray.intersectObjects(environment.interactables)[0];
+    const target = hitObject?.object.userData.targets?.[hitObject.instanceId] || hitObject?.object.userData;
+    if (target?.ad) return openAd(target.ad);
+    if (target?.seat) return sit(target.seat);
+    if (target?.carDelta) return changeCar(car + target.carDelta);
     const hit = ray.intersectObject(floor)[0];
-    if (hit) move({ x: Math.max(-1.15, Math.min(1.15, hit.point.x)), z: Math.max(-9, Math.min(9, hit.point.z)) });
+    if (hit) requestMove({ x: Math.max(-1.15, Math.min(1.15, hit.point.x)), z: Math.max(-9, Math.min(9, hit.point.z)) });
   }
   canvas.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY, yaw: targetYaw, moved: false }; canvas.setPointerCapture(e.pointerId); });
   canvas.addEventListener('pointermove', e => { if (!drag) return; if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) > 8) drag.moved = true; if (drag.moved) targetYaw = drag.yaw - (e.clientX - drag.x) * .004; });
@@ -113,22 +142,34 @@ export function createCabin({ canvas, move, changeCar, sit, openAd, openMessage,
     if (current?.trip && ['q', 'e'].includes(e.key.toLowerCase())) { e.preventDefault(); if (!e.repeat) changeCar(car + (e.key.toLowerCase() === 'q' ? -1 : 1)); return; }
     const d = directions[e.key]; if (!d || !current?.trip) return; e.preventDefault();
     if (performance.now() - lastKeyMove < 250) return; lastKeyMove = performance.now();
-    const p = people.get(current.id)?.target; if (p) move({ x: p.x + d[0], z: p.z + d[1] });
+    const p = people.get(current.id)?.target; if (p) requestMove({ x: p.x + d[0], z: p.z + d[1] });
   });
   function resize() { const w = canvas.clientWidth, h = canvas.clientHeight; renderer.setSize(w, h, false); camera.aspect = w / h; camera.fov = w < h ? 67 : 57; camera.updateProjectionMatrix(); }
   new ResizeObserver(resize).observe(canvas); resize();
   camera.position.set(0, 2.65, 11);
   const clock = new THREE.Clock(), cameraTarget = new THREE.Vector3(), look = new THREE.Vector3();
-  let adCheck = 0;
+  let adCheck = 0, slowFrames = 0, qualityCheckAt = 0;
+  const sampled = {}, cameraForward = new THREE.Vector3(), projectedPoint = new THREE.Vector3(), relativePoint = new THREE.Vector3();
+  const idlePosition = new THREE.Vector3(0, 0, 5), placed = [];
   renderer.setAnimationLoop(() => {
     if (document.hidden) { clock.getDelta(); return; }
-    const dt = Math.min(clock.getDelta(), .05), time = clock.elapsedTime;
+    const rawDt = clock.getDelta(), dt = Math.min(rawDt, .1), time = clock.elapsedTime, frameAt = performance.now();
+    if (qualityMode === 'auto' && rawDt > 1 / 42 && rawDt < .25) slowFrames++;
+    if (time - qualityCheckAt > 2) {
+      qualityCheckAt = time;
+      if (qualityMode === 'auto' && slowFrames > 35 && renderer.getPixelRatio() > .8) renderer.setPixelRatio(Math.max(.8, renderer.getPixelRatio() * .8));
+      slowFrames = 0;
+    }
     for (const [id, p] of people) {
+      if (p.movement) {
+        sampleWalk(p.movement.walk, p.movement.serverAt + frameAt - p.movement.receivedAt, sampled);
+        p.target.set(sampled.x, 0, sampled.z);
+      }
       const distance = p.root.position.distanceTo(p.target), walking = distance > .04 && !p.data?.seat;
       if (walking) { const dx = p.target.x - p.root.position.x, dz = p.target.z - p.root.position.z; p.root.rotation.y = Math.atan2(dx, dz); }
       p.root.position.lerp(p.target, !motion ? 1 : Math.min(1, dt * 12));
       const swing = walking && !!motion ? Math.sin(time * 10) * .45 : 0;
-      const chair = SEATS.find(s => s.id === p.data?.seat);
+      const chair = p.chair;
       if (chair) p.root.rotation.y = chair.angle;
       p.legs.forEach((leg, i) => { leg.rotation.x = chair ? Math.PI / 2 : swing * (i ? 1 : -1); leg.position.y = chair ? .48 : .24; leg.position.z = chair ? .17 : 0; });
       const reacting = p.emoteUntil > Date.now();
@@ -146,7 +187,7 @@ export function createCabin({ canvas, move, changeCar, sit, openAd, openMessage,
       b.sprite.material.opacity = Math.min(1, (20 - age) / 3);
     }
     yaw += (targetYaw - yaw) * Math.min(1, dt * 7);
-    const me = people.get(current?.id)?.root.position || new THREE.Vector3(0, 0, 5);
+    const me = people.get(current?.id)?.root.position || idlePosition;
     cameraTarget.set(me.x * .35 + Math.sin(yaw) * 2, 2.65, Math.max(-12.5, Math.min(12.5, me.z + Math.cos(yaw) * 5.5)));
     camera.position.lerp(cameraTarget, resetCamera || !motion ? 1 : Math.min(1, dt * 4)); resetCamera = false;
     look.set(me.x - Math.sin(yaw) * 4, 1.65, me.z - Math.cos(yaw) * 4); camera.lookAt(look);
@@ -157,15 +198,16 @@ export function createCabin({ canvas, move, changeCar, sit, openAd, openMessage,
       if (destination >= 1 && destination <= CAR_COUNT) { crossingAt = time; changeCar(destination); }
     }
     for (const p of people.values()) {
-      const projected = p.label.position.clone().project(camera);
+      const projected = projectedPoint.copy(p.label.position).project(camera);
       p.label.visible = projected.z < 1 && Math.abs(projected.x) < 1.1;
     }
     // Keep clouds readable inside narrow screens and stagger overlapping speech.
-    const placed = [], w = canvas.clientWidth, h = canvas.clientHeight;
-    const cameraForward = new THREE.Vector3(); camera.getWorldDirection(cameraForward);
+    placed.length = 0;
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    camera.getWorldDirection(cameraForward);
     for (const b of [...bubbles.values()].sort((a, b) => b.at - a.at)) {
-      const sprite = b.sprite, relative = sprite.position.clone().sub(camera.position);
-      const depth = relative.dot(cameraForward), projected = sprite.position.clone().project(camera);
+      const sprite = b.sprite, relative = relativePoint.copy(sprite.position).sub(camera.position);
+      const depth = relative.dot(cameraForward), projected = projectedPoint.copy(sprite.position).project(camera);
       sprite.visible = depth > .2 && projected.z < 1 && placed.length < 8;
       if (!sprite.visible) continue;
       const unitsPerPixel = 2 * depth * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) / h;
@@ -178,12 +220,20 @@ export function createCabin({ canvas, move, changeCar, sit, openAd, openMessage,
       if (y < height / 2 + 70) { sprite.visible = false; continue; }
       placed.push({ x, y, width, height });
       sprite.scale.set(width * unitsPerPixel, height * unitsPerPixel, 1);
-      sprite.position.copy(new THREE.Vector3(x / w * 2 - 1, 1 - y / h * 2, projected.z).unproject(camera));
+      sprite.position.copy(projectedPoint.set(x / w * 2 - 1, 1 - y / h * 2, projected.z).unproject(camera));
     }
     environment.tick(dt, me, motion);
     if (current && time - adCheck > 1) { adCheck = time; environment.update(current); }
     renderer.render(scene, camera);
   });
   canvas.addEventListener('webglcontextlost', event => { event.preventDefault(); onError('3D 연결이 끊겼어요. 대화 기록은 계속 사용할 수 있어요. 화면을 새로고침하면 다시 시도합니다.'); });
-  return { update, setLine() {}, configure({ scenery, animate, quality } = {}) { if (scenery) environment.setScenery(scenery); if (typeof animate === 'boolean') motion = animate; if (quality) renderer.setPixelRatio(quality === 'low' ? 1 : Math.min(devicePixelRatio || 1, 1.8)); } };
+  return {
+    update, motion: applyMovement, setLine() {},
+    metrics() { const me = people.get(current?.id)?.root.position; return { drawCalls: renderer.info.render.calls, triangles: renderer.info.render.triangles, pixelRatio: renderer.getPixelRatio(), position: me ? { x: me.x, z: me.z } : null }; },
+    configure({ scenery, animate, quality } = {}) {
+      if (scenery) environment.setScenery(scenery);
+      if (typeof animate === 'boolean') motion = animate;
+      if (quality) { qualityMode = quality; renderer.setPixelRatio(quality === 'low' ? 1 : quality === 'high' ? Math.min(devicePixelRatio || 1, 1.8) : autoRatio()); }
+    }
+  };
 }

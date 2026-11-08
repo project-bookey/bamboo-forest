@@ -16,13 +16,36 @@ function setDrawer(open) {
 }
 $('drawer-toggle').onclick = () => setDrawer($('workspace').hidden);
 document.addEventListener('keydown', event => { if (event.key === 'Escape' && !document.querySelector('dialog[open]')) { setDrawer(false); $('drawer-toggle').focus(); } });
-const cabin = createCabin({ canvas: $('cabin'), changeCar: number => controls?.changeCar(number), sit: seat => controls?.sit(seat), openAd: id => controls?.openAd(id), move: async position => { try { await api('move', position); } catch (error) { alert(error.message); } }, openMessage: id => { setDrawer(true); requestAnimationFrame(() => document.getElementById('message-' + id)?.scrollIntoView({ block: 'center' })); }, onError: message => { $('scene-error').textContent = message; $('scene-error').hidden = false; setDrawer(true); } });
+const cabin = createCabin({ canvas: $('cabin'), changeCar: number => controls?.changeCar(number), sit: seat => controls?.sit(seat), openAd: id => controls?.openAd(id), move: sendMovement, openMessage: id => { setDrawer(true); requestAnimationFrame(() => document.getElementById('message-' + id)?.scrollIntoView({ block: 'center' })); }, onError: message => { $('scene-error').textContent = message; $('scene-error').hidden = false; setDrawer(true); } });
 const node = (tag, text, className) => { const el = document.createElement(tag); if (text != null) el.textContent = text; if (className) el.className = className; return el; };
 let alertTimer;
 function alert(message) { $('alert').textContent = message; $('alert').hidden = false; clearTimeout(alertTimer); alertTimer = setTimeout(() => $('alert').hidden = true, 5000); }
 async function api(path, data) {
   const response = await fetch(BASE + path, data === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
   const result = await response.json(); if (!response.ok) { const error = Error(result.error || '다시 시도해 주세요.'); error.status = response.status; throw error; } return result;
+}
+let pendingMovement = null, movementSending = false, movementSentAt = -Infinity;
+function sendMovement(position) {
+  return new Promise((resolve, reject) => {
+    pendingMovement?.resolve(null);
+    pendingMovement = { position, resolve, reject };
+    flushMovement();
+  });
+}
+async function flushMovement() {
+  if (movementSending || !pendingMovement) return;
+  movementSending = true;
+  const delay = Math.max(0, 250 - (performance.now() - movementSentAt));
+  if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+  const request = pendingMovement; pendingMovement = null;
+  try {
+    if (!state?.trip || request.position.room !== state.trip.room || request.position.car !== state.trip.car) { request.resolve(null); return; }
+    movementSentAt = performance.now(); request.resolve(await api('move', request.position));
+  } catch (error) {
+    if (request.position.room !== state?.trip?.room || request.position.car !== state?.trip?.car) request.resolve(null);
+    else { request.reject(error); alert(error.message); }
+  }
+  finally { movementSending = false; flushMovement(); }
 }
 function invalidate() { queryVersion++; $('trains').replaceChildren(); $('train-status').hidden = true; $('service-hours').hidden = true; }
 function setPicking(value) { picking = value; ['from', 'to'].forEach(key => $('pick-' + key).setAttribute('aria-pressed', String(key === picking))); $('map-hint').textContent = `노선도에서 ${picking === 'from' ? '탑승역' : '하차역'}을 눌러 주세요`; }
@@ -195,6 +218,7 @@ async function connect() {
     applyState(await api('session', {})); stream?.close(); stream = new EventSource(BASE + 'events');
     stream.onopen = () => { $('connection').textContent = '● 연결됨'; $('send').disabled = !!state?.mutedUntil; };
     stream.addEventListener('state', e => applyState(JSON.parse(e.data)));
+    stream.addEventListener('motion', e => cabin.motion(JSON.parse(e.data)));
     stream.onerror = () => { $('connection').textContent = '재연결 중'; $('send').disabled = true; stream.close(); clearTimeout(retryTimer); retryTimer = setTimeout(connect, 3000); };
   } catch (e) { $('connection').textContent = '연결을 기다리는 중'; alert(e.message); retryTimer = setTimeout(connect, 5000); }
   finally { connecting = false; }

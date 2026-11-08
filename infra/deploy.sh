@@ -3,8 +3,13 @@ set -euo pipefail
 PACKAGE=${1:?archive required}
 VERSION=${2:?release ID required}
 [[ "$VERSION" =~ ^[a-zA-Z0-9-]+$ ]]
+EXPECTED_REVISION=${3:-}
+[[ -z "$EXPECTED_REVISION" || "$EXPECTED_REVISION" =~ ^[a-f0-9]{40}$ ]]
 APP=/opt/bamboo-forest
+exec 9>"$APP/deploy.lock"
+flock -w 300 9
 RELEASE="$APP/releases/$VERSION"
+test ! -e "$RELEASE"
 BACKUP=$(mktemp -d "$APP/deploy-backup.XXXXXX")
 PREVIOUS=$(readlink -f "$APP/current")
 cp -p /etc/nginx/conf.d/bookey-web.conf "$BACKUP/bookey-web.conf"
@@ -42,5 +47,14 @@ install -m 644 "$RELEASE/infra/bamboo-forest.locations.conf" /etc/nginx/snippets
 nginx -t
 systemctl reload nginx
 curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-delay 1 --resolve www.bookey.site:443:127.0.0.1 https://www.bookey.site/metro-chat/api/health
+if [ -n "$EXPECTED_REVISION" ]; then
+  for URL in http://127.0.0.1:3212/metro-chat/api/health https://www.bookey.site/metro-chat/api/health; do
+    curl --fail --silent --show-error --max-time 20 "$URL" | /opt/mandragora/node/bin/node --input-type=module -e '
+      let body = ""; for await (const chunk of process.stdin) body += chunk;
+      const health = JSON.parse(body);
+      if (health.status !== "ok" || health.mode !== "live" || health.revision !== process.argv[1]) process.exit(1);
+    ' "$EXPECTED_REVISION"
+  done
+fi
 trap - ERR
 printf '\nDeployed %s; backup %s\n' "$VERSION" "$BACKUP"

@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { readFileSync, existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -6,14 +7,16 @@ import { LINES, route, stationName, reachesDestination, trainStops, serviceDay, 
 import { TimetableProvider } from './timetable.mjs';
 import { PositionProvider, tripProgress } from './positions.mjs';
 import { ModerationStore } from './moderation.mjs';
+import { createWalk, sampleWalk } from './cabin-motion.mjs';
 import { CAR_COUNT, SEATS, REACTIONS, COAT_COLORS } from './cabin-data.mjs';
 
 const BASE = '/metro-chat';
+const releaseFile = new URL('./data/release.json', import.meta.url);
+const revision = existsSync(releaseFile) ? JSON.parse(readFileSync(releaseFile, 'utf8')).revision : null;
 const walkingPosition = (s, time) => {
   const walk = s.walk;
   if (!walk) return { x: 0, z: 5 };
-  const fraction = Math.min(1, Math.max(0, (time - walk.at) / Math.max(1, walk.duration)));
-  return { x: walk.x + (walk.toX - walk.x) * fraction, z: walk.z + (walk.toZ - walk.z) * fraction };
+  return sampleWalk(walk, time);
 };
 export function createSubwayServer({ now = Date.now, provider = new TransitProvider({ now }), timetable = new TimetableProvider({ now }), positions = new PositionProvider({ key: provider.key, demo: provider.demo, now }), moderation = new ModerationStore({ now }), adminToken = process.env.METRO_ADMIN_TOKEN, secure = process.env.NODE_ENV === 'production' } = {}) {
   const sessions = new Map(), rooms = new Map(), rates = new Map();
@@ -24,9 +27,9 @@ export function createSubwayServer({ now = Date.now, provider = new TransitProvi
     const passengers = room ? [...sessions.values()].filter(p => p.trip?.room === s.trip.room && (p.streams.size || p === s)) : [];
     const blocked = moderation.blocks(s.id);
     const car = s.trip?.car || 1;
-    return { id: s.id, name: s.name, trip: s.trip, progress: s.trip ? progress : null, ended: s.ended || null, blocked, mutedUntil: moderation.mutedUntil(s.id), count: passengers.length,
+    return { serverAt: now(), id: s.id, name: s.name, trip: s.trip, progress: s.trip ? progress : null, ended: s.ended || null, blocked, mutedUntil: moderation.mutedUntil(s.id), count: passengers.length,
       cars: Array.from({ length: CAR_COUNT }, (_, i) => ({ number: i + 1, count: passengers.filter(p => (p.trip.car || 1) === i + 1).length })),
-      players: passengers.filter(p => !blocked.some(b => b.id === p.id)).map(p => ({ id: p.id, name: p.name, car: p.trip.car || 1, seat: p.seat || null, coat: p.coat ?? (parseInt(p.id.slice(0, 4), 16) % COAT_COLORS.length), emote: p.emote?.until > now() ? p.emote : null, ...walkingPosition(p, now()) })),
+      players: passengers.filter(p => !blocked.some(b => b.id === p.id)).map(p => ({ id: p.id, name: p.name, car: p.trip.car || 1, seat: p.seat || null, coat: p.coat ?? (parseInt(p.id.slice(0, 4), 16) % COAT_COLORS.length), emote: p.emote?.until > now() ? p.emote : null, walk: p.walk, ...walkingPosition(p, now()) })),
       messages: (room?.messages || []).filter(message => moderation.visible(s.id, message) && (message.scope !== 'car' || message.car === car)) };
   };
   const publish = s => {
@@ -34,6 +37,14 @@ export function createSubwayServer({ now = Date.now, provider = new TransitProvi
     for (const stream of s.streams) { if (stream.writableLength > 128 * 1024) stream.destroy(); else stream.write(message); }
   };
   const broadcast = () => { for (const s of sessions.values()) publish(s); };
+  const motion = s => ({ serverAt: now(), id: s.id, car: s.trip.car, walk: s.walk, ...walkingPosition(s, now()) });
+  const publishMotion = s => {
+    const payload = `event: motion\ndata: ${JSON.stringify(motion(s))}\n\n`;
+    for (const recipient of sessions.values()) {
+      if (recipient.trip?.room !== s.trip.room || recipient.trip.car !== s.trip.car || moderation.blocks(recipient.id).some(b => b.id === s.id)) continue;
+      for (const stream of recipient.streams) { if (stream.writableLength > 128 * 1024) stream.destroy(); else stream.write(payload); }
+    }
+  };
   const endTrip = (s, reason) => { s.ended = { reason, at: now(), from: s.trip?.from, to: s.trip?.to }; s.trip = null; s.progress = null; };
   const availableTrains = async (line, station, source) => source === 'running' && !provider.demo ? { mode: provider.key ? 'live' : 'unconfigured', fetchedAt: now(), trains: await positions.positions(line), source } : { ...await provider.arrivals(line, station), source };
   const server = http.createServer(async (req, res) => {
@@ -44,13 +55,13 @@ export function createSubwayServer({ now = Date.now, provider = new TransitProvi
         res.writeHead(301, { Location: BASE + suffix + url.search }); return res.end();
       }
       if (req.method === 'GET' && url.pathname === BASE) { res.writeHead(301, { Location: BASE + '/' }); return res.end(); }
-      const publicFiles = ['index.html', 'client.js', 'features.js', 'transit.mjs', 'journey.mjs', 'cabin.js', 'cabin.css', 'cabin-data.mjs', 'cabin-environment.js', 'cabin-controls.js', 'vendor/three.module.min.js', 'vendor/three.LICENSE'];
+      const publicFiles = ['index.html', 'client.js', 'features.js', 'transit.mjs', 'journey.mjs', 'cabin.js', 'cabin.css', 'cabin-data.mjs', 'cabin-environment.js', 'cabin-controls.js', 'cabin-motion.mjs', 'vendor/three.module.min.js', 'vendor/three.LICENSE'];
       if (req.method === 'GET' && (url.pathname === BASE + '/' || publicFiles.some(file => url.pathname === BASE + '/' + file))) {
         const file = url.pathname === BASE + '/' ? 'index.html' : url.pathname.slice(BASE.length + 1);
         const body = file === 'transit.mjs' ? `export const LINES = ${JSON.stringify(LINES)}; export const route = ${route.toString()}; export const stationName = ${stationName.toString()}; export const reachesDestination = ${reachesDestination.toString()}; export const trainStops = ${trainStops.toString()};` : await readFile(new URL('./' + file, import.meta.url));
         res.writeHead(200, { 'Content-Type': file.endsWith('.html') ? 'text/html; charset=utf-8' : file.endsWith('.css') ? 'text/css; charset=utf-8' : file.endsWith('.LICENSE') ? 'text/plain; charset=utf-8' : 'text/javascript; charset=utf-8', 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff' }); return res.end(body);
       }
-      if (req.method === 'GET' && url.pathname === BASE + '/api/health') return send(res, 200, { status: 'ok', service: 'subway-chat', mode: provider.demo ? 'demo' : provider.key ? 'live' : 'unconfigured' });
+      if (req.method === 'GET' && url.pathname === BASE + '/api/health') return send(res, 200, { status: 'ok', service: 'subway-chat', revision, mode: provider.demo ? 'demo' : provider.key ? 'live' : 'unconfigured' });
       const token = /(?:^|;\s*)subway_session=([a-f0-9]{48})(?:;|$)/.exec(req.headers.cookie || '')?.[1];
       let session = sessions.get(token);
       if (req.method === 'GET' && url.pathname === BASE + '/api/events') {
@@ -163,13 +174,15 @@ export function createSubwayServer({ now = Date.now, provider = new TransitProvi
       }
       if (req.method === 'POST' && url.pathname === BASE + '/api/move') {
         if (!session.trip) return send(res, 409, { error: '먼저 열차에 탑승해 주세요.' });
+        if (data.car !== undefined && data.car !== session.trip.car || data.room !== undefined && data.room !== session.trip.room) return send(res, 409, { error: '객실이 바뀌었어요. 현재 칸에서 다시 이동해 주세요.' });
         if (!Number.isFinite(data.x) || !Number.isFinite(data.z)) return send(res, 400, { error: '이동할 위치를 확인해 주세요.' });
         if (now() - (session.movedAt ?? -Infinity) < 200) return send(res, 429, { error: '이동할 위치를 잠시 후 다시 선택해 주세요.' });
         const position = walkingPosition(session, now()), x = Math.max(-1.15, Math.min(1.15, data.x)), z = Math.max(-9, Math.min(9, data.z));
-        if (session.seat) { position.x = Math.sign(position.x) * 1.1; position.z = Math.max(-9, Math.min(9, position.z)); session.seat = null; }
+        if (session.seat) { session.stoodOnMove = true; position.x = Math.sign(position.x) * 1.1; position.z = Math.max(-9, Math.min(9, position.z)); session.seat = null; }
         session.movedAt = now();
-        session.walk = { ...position, toX: x, toZ: z, at: now(), duration: Math.hypot(x - position.x, z - position.z) / 2.2 * 1000 };
-        broadcast(); return send(res, 200, { ok: true });
+        session.walk = createWalk(position, { x, z }, now());
+        if (session.stoodOnMove) { session.stoodOnMove = false; broadcast(); } else publishMotion(session);
+        return send(res, 200, motion(session));
       }
       if (req.method === 'POST' && url.pathname === BASE + '/api/leave') { endTrip(session, 'manual'); broadcast(); return send(res, 200, state(session)); }
       if (req.method === 'POST' && url.pathname === BASE + '/api/trip-options') {
@@ -223,13 +236,7 @@ export function createSubwayServer({ now = Date.now, provider = new TransitProvi
     for (const [ip, r] of rates) if (r.until < now()) rates.delete(ip);
     broadcast();
   }, 15000);
-  let movementWasActive = false;
-  const movementTimer = setInterval(() => {
-    const active = [...sessions.values()].some(s => s.trip && s.walk && now() < s.walk.at + s.walk.duration);
-    if (active || movementWasActive) broadcast();
-    movementWasActive = active;
-  }, 250);
-  server.on('close', () => { clearInterval(timer); clearInterval(movementTimer); });
+  server.on('close', () => clearInterval(timer));
   return { server, sessions, rooms, moderation };
 }
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
