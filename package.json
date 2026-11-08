@@ -1,0 +1,7 @@
+{
+  "name": "metro-chat",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node server.mjs", "test": "node --test", "update-timetable": "node scripts/update-timetable.mjs" },
+  "engines": { "node": ">=20" }
+}

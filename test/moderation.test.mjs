@@ -1,0 +1,56 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtemp,rm,readFile,stat} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {ModerationStore} from '../moderation.mjs';
+import {createSubwayServer} from '../server.mjs';
+import {TransitProvider} from '../transit.mjs';
+
+test('moderation data persists with private permissions and expires; report deduplication and limits are enforced',async t=>{
+  const directory=await mkdtemp(join(tmpdir(),'metro-moderation-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+  let now=Date.now();const store=new ModerationStore({directory,now:()=>now});await store.ready;
+  const message={id:'message-1',sender:'sender',name:'승객 A',text:'신고 메시지',at:now};
+  await store.block('viewer',message);assert.equal(store.visible('viewer',message),false);assert.equal(store.visible('other',message),true);
+  const id=await store.report('viewer','room',message,'광고·도배');assert.equal(await store.report('viewer','room',message,'광고·도배'),id);
+  await store.review(id,'mute',5);assert.ok(store.mutedUntil('sender'));
+  const restored=new ModerationStore({directory,now:()=>now});await restored.ready;
+  assert.equal(restored.blocks('viewer').length,1);assert.equal(restored.reports().length,1);assert.ok(restored.mutedUntil('sender'));
+  assert.equal((await stat(join(directory,'moderation.json'))).mode&0o777,0o600);
+  for(let index=2;index<=5;index++)await store.report('viewer','room',{...message,id:'message-'+index},'기타');
+  await assert.rejects(store.report('viewer','room',{...message,id:'message-6'},'기타'),error=>error.status===429);
+  await assert.rejects(store.report('sender','room',message,'기타'));
+  now+=31*86400000;await store.save();const data=JSON.parse(await readFile(join(directory,'moderation.json'),'utf8'));
+  assert.deepEqual(data.reports,[]);assert.deepEqual(data.blocks,{});assert.deepEqual(data.mutes,{});assert.deepEqual(data.hidden,{});
+});
+test('report/block isolation, operator authorization, hiding/muting and anonymous identity survive server restart',async t=>{
+  const directory=await mkdtemp(join(tmpdir(),'metro-moderation-http-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+  let now=Date.now();const adminToken='test-admin-token-with-at-least-32-characters';
+  let app;
+  async function start(){const moderation=new ModerationStore({directory,now:()=>now});await moderation.ready;app=createSubwayServer({provider:new TransitProvider({demo:true}),now:()=>now,moderation,adminToken,secure:false});await new Promise(r=>app.server.listen(0,'127.0.0.1',r));return `http://127.0.0.1:${app.server.address().port}`;}
+  const stop=async()=>{app.server.closeAllConnections();await new Promise(r=>app.server.close(r));};
+  let origin=await start();t.after(async()=>{if(app.server.listening)await stop();});
+  const post=async(name,data,cookie,admin=false)=>{now+=2000;return fetch(origin+'/metro-chat/api/'+name,{method:'POST',headers:{Origin:origin,'Content-Type':'application/json',...(cookie?{Cookie:cookie}:{}),...(admin?{Authorization:`Bearer ${adminToken}`}:{})},body:JSON.stringify(data)});};
+  const a=await post('session',{}),b=await post('session',{}),c=await post('session',{});
+  const ac=a.headers.get('set-cookie').split(';')[0],bc=b.headers.get('set-cookie').split(';')[0],cc=c.headers.get('set-cookie').split(';')[0],aid=(await a.json()).id;
+  const trip={line:'1002',from:'강남',to:'사당',direction:0,train:'demo-0'};
+  for(const cookie of [ac,bc,cc])assert.equal((await post('board',trip,cookie)).status,200);
+  await post('say',{text:'운영 검증용 메시지'},ac);
+  const visible=await (await post('session',{},bc)).json(),message=visible.messages[0];
+  const report=await post('report',{messageId:message.id,reason:'광고·도배',block:true},bc);assert.equal(report.status,200);
+  const blocked=await report.json();assert.equal(blocked.messages.length,0);assert.equal(blocked.blocked.length,1);
+  assert.equal((await (await post('session',{},cc)).json()).messages.length,1);
+  assert.equal((await fetch(origin+'/metro-chat/api/moderation/reports')).status,401);
+  assert.equal((await post('moderation/review',{id:blocked.reportId,action:'hide'},bc)).status,401);
+  const reports=await (await fetch(origin+'/metro-chat/api/moderation/reports',{headers:{Authorization:`Bearer ${adminToken}`}})).json();assert.equal(reports.reports[0].message.text,message.text);
+  assert.equal((await post('moderation/review',{id:blocked.reportId,action:'hide'},null,true)).status,200);
+  assert.equal((await (await post('session',{},cc)).json()).messages.length,0);
+  assert.equal((await post('moderation/review',{id:blocked.reportId,action:'mute',minutes:30},null,true)).status,200);
+  assert.equal((await post('say',{text:'blocked by operator'},ac)).status,403);
+  await post('leave',{},cc);assert.equal((await post('report',{messageId:message.id,reason:'기타'},cc)).status,400);
+  await stop();origin=await start();
+  const restoredA=await (await post('session',{},ac)).json(),restoredB=await (await post('session',{},bc)).json();
+  assert.equal(restoredA.id,aid);assert.ok(restoredA.mutedUntil);assert.equal(restoredB.blocked[0].id,aid);
+  const unblocked=await (await post('unblock',{sender:aid},bc)).json();assert.deepEqual(unblocked.blocked,[]);
+  assert.equal((await fetch(origin+'/metro-chat/moderation.mjs')).status,404);
+});

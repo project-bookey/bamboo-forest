@@ -1,0 +1,58 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { PositionProvider, positionTime, tripProgress } from '../positions.mjs';
+import { createSubwayServer } from '../server.mjs';
+
+test('position responses normalize timestamps, operator direction and stale/invalid rows; lookups coalesce', async () => {
+  let now=Date.parse('2026-11-08T10:00:00+09:00'),calls=0;
+  const row={subwayId:'1009',trainNo:'0023',statnNm:'여의도',statnTnm:'중앙보훈병원',lastRecptnDt:'20261108',recptnDt:'10:00:00',updnLine:'0',trainSttus:'1',directAt:'1'};
+  const provider=new PositionProvider({key:'test',now:()=>now,fetcher:async()=>{calls++;return {ok:true,json:async()=>({errorMessage:{code:'INFO-000'},realtimePositionList:[row,{...row,trainNo:'24',recptnDt:'09:00:00'},{...row,trainNo:'25',trainSttus:'bad'},{...row,subwayId:'1001'}]})};}});
+  const [a,b]=await Promise.all([provider.positions('1009'),provider.positions('1009')]);
+  assert.deepEqual(a,b);assert.equal(calls,1);assert.equal(a.length,1);assert.equal(a[0].number,'23');assert.equal(a[0].direction,1);assert.equal(a[0].kind,'급행');
+  assert.equal(positionTime({...row,recptnDt:'2026-11-08 10:00:00'}),now);
+  assert.equal(positionTime({...row,recptnDt:'2026-11-08T01:00:00Z'}),now);
+  await provider.positions('1009');assert.equal(calls,1);
+  now+=21000;await provider.positions('1009');assert.equal(calls,2);
+  const empty=new PositionProvider({key:'test',fetcher:async()=>({ok:true,json:async()=>({code:'INFO-200'})})});assert.deepEqual(await empty.positions('1009'),[]);
+});
+test('automatic arrival requires fresh ordered observations and never treats a missing position as arrival', () => {
+  const start=Date.parse('2026-11-08T10:00:00+09:00'),trip={train:'23',direction:1,boardedAt:start,from:'여의도',to:'동작',pathStops:['여의도','샛강','노량진','노들','흑석','동작'],stops:['여의도','노량진','동작']};
+  const record=(station,time,status='arrived')=>({number:'23',direction:1,station,status,updatedAt:new Date(time).toISOString()});
+  assert.equal(tripProgress(trip,record('동작',start+1000),null,start+1000).autoConfirmed,false);
+  const before=tripProgress(trip,record('노량진',start+1000),null,start+1000);assert.equal(before.near,true);assert.equal(before.remaining,1);
+  const arrived=tripProgress(trip,record('동작',start+21000),before,start+21000);assert.equal(arrived.autoConfirmed,true);
+  assert.equal(tripProgress(trip,record('동작',start+21000,'approaching'),before,start+21000).autoConfirmed,false);
+  assert.equal(tripProgress(trip,record('동작',start+21000),before,start+20000).autoConfirmed,false);
+  assert.equal(tripProgress(trip,null,before,start+21000).available,false);
+  assert.equal(tripProgress(trip,record('노량진',start-1000),null,start).available,false);
+  assert.equal(tripProgress(trip,record('노량진',start+1000),null,start+92000).available,false);
+  assert.equal(tripProgress(trip,{...record('動作',start+21000),number:'24'},before,start+21000).available,false);
+  assert.equal(tripProgress(trip,record('여의도',start+21000),before,start+21000).available,false);
+});
+test('running and arrival selections share the same room; express checks and opt-in automatic leave are server enforced',async t=>{
+  let now=Date.parse('2026-11-08T10:00:00+09:00'),records=[];
+  const train={id:'23',number:'23',direction:1,destination:'중앙보훈병원',kind:'급행',express:true};
+  const provider={key:'test',arrivals:async()=>({mode:'live',trains:[train]})};
+  const {server}=createSubwayServer({provider,positions:{positions:async()=>records},now:()=>now,secure:false,timetable:{states:async()=>[]}});
+  await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>{server.closeAllConnections();server.close();});
+  const origin=`http://127.0.0.1:${server.address().port}`,base=origin+'/metro-chat/api/';
+  const post=async(name,data,cookie)=>{now+=2000;return fetch(base+name,{method:'POST',headers:{Origin:origin,'Content-Type':'application/json',...(cookie?{Cookie:cookie}:{})},body:JSON.stringify(data)});};
+  const a=await post('session',{}),b=await post('session',{}),ac=a.headers.get('set-cookie').split(';')[0],bc=b.headers.get('set-cookie').split(';')[0];
+  const trip={line:'1009',from:'여의도',to:'동작',direction:1,train:'23'};
+  const boarded=await post('board',trip,ac);assert.equal(boarded.status,200);const ar=(await boarded.json()).trip.room;
+  assert.equal((await post('board',{...trip,to:'흑석'},bc)).status,400);
+  const record=(station)=>({...train,station,status:'arrived',updatedAt:new Date(now+2000).toISOString()});
+  records=[record('여의도')];
+  const running=await post('board',{...trip,source:'running'},bc);assert.equal(running.status,200);assert.equal((await running.json()).trip.room,ar);
+  assert.equal((await (await post('trip-options',{autoLeave:true},ac)).json()).trip.autoLeave,true);
+  records=[record('동작')];assert.ok((await (await post('trip-check',{},ac)).json()).trip,'first destination observation cannot auto-leave');
+  await post('leave',{},ac);await post('board',trip,ac);await post('trip-options',{autoLeave:true},ac);
+  records=[record('노량진')];assert.equal((await (await post('trip-check',{},ac)).json()).progress.near,true);
+  records=[];assert.ok((await (await post('trip-check',{},ac)).json()).trip);
+  records=[record('동작')];assert.ok((await (await post('trip-check',{},ac)).json()).trip,'gap invalidates the previous observation');
+  await post('leave',{},ac);await post('board',trip,ac);await post('trip-options',{autoLeave:true},ac);
+  records=[record('노량진')];await post('trip-check',{},ac);
+  records=[record('동작')];const ended=await (await post('trip-check',{},ac)).json();assert.equal(ended.trip,null);assert.equal(ended.ended.reason,'arrival');
+  assert.equal((await post('say',{text:'after arrival'},ac)).status,409);
+  const stillBoarded=await (await post('trip-check',{},bc)).json();assert.ok(stillBoarded.trip,'auto-leave stays off by default');
+});
